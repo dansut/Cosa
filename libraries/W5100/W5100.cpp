@@ -16,6 +16,8 @@
  * Lesser General Public License for more details.
  *
  * This file is part of the Arduino Che Cosa project.
+ *
+ * Code implements W5200 *NOT* W5100 despite naming.
  */
 
 #include "W5100.hh"
@@ -44,19 +46,20 @@ W5100::W5100(const uint8_t* mac, Board::DigitalPin csn) :
 void
 W5100::write(uint16_t addr, const void* buf, size_t len, bool progmem)
 {
+  if(len == 0) return; // Zero len write upsets W5200 apparently
   const uint8_t* bp = (const uint8_t*) buf;
-  uint16_t last = addr + len;
   spi.acquire(this);
   spi.begin();
-  while (addr < last) {
-    spi.transfer_start(OP_WRITE);
-    spi.transfer_next(addr >> 8);
-    spi.transfer_next(addr++);
-    spi.transfer_next(progmem ? pgm_read_byte(bp++) : *bp++);
-    spi.transfer_await();
-    m_cs.set();
-    m_cs.clear();
+  spi.transfer_start(addr >> 8);
+  spi.transfer_next(addr); // no longer need to increment as can burst write
+  spi.transfer_next((0x80 | ((len & 0x7F00) >> 8))); // Top bit set for write
+  spi.transfer_next(len & 0x00FF); // with burst length following
+  for (size_t i=0; i < len; i++) {
+    spi.transfer_next(progmem ? pgm_read_byte(bp+i) : bp[i]);
   }
+  spi.transfer_await();
+  m_cs.set();
+  m_cs.clear();
   spi.end();
   spi.release();
 }
@@ -73,18 +76,18 @@ void
 W5100::read(uint16_t addr, void* buf, size_t len)
 {
   uint8_t* bp = (uint8_t*) buf;
-  uint16_t last = addr + len;
   spi.acquire(this);
   spi.begin();
-  while (addr < last) {
-    spi.transfer_start(OP_READ);
-    spi.transfer_next(addr >> 8);
-    spi.transfer_next(addr++);
-    spi.transfer_next(0);
-    *bp++ = spi.transfer_await();
-    m_cs.set();
-    m_cs.clear();
+  spi.transfer_start(addr >> 8);
+  spi.transfer_next(addr);
+  spi.transfer_next((len & 0x7F00) >> 8); // Top bit clear for write
+  spi.transfer_next(len & 0x00FF);  // with burst length following
+  spi.transfer_await();
+  for (size_t i=0; i < len; i++) {
+    bp[i] = spi.transfer(0);
   }
+  m_cs.set();
+  m_cs.clear();
   spi.end();
   spi.release();
 }
@@ -536,7 +539,7 @@ W5100::begin(uint8_t ip[4], uint8_t subnet[4], uint16_t timeout)
 {
   // Initiate socket structure; buffer allocation and socket register pointer
   for (uint8_t i = 0; i < SOCK_MAX; i++) {
-    SocketRegister* sreg = &((SocketRegister*) SOCKET_REGISTER_BASE)[i];
+    SocketRegister* sreg = (SocketRegister*)(SOCKET_REGISTER_BASE + (i * SOCKET_REGISTER_SIZE));
     m_sock[i].m_proto = 0;
     m_sock[i].m_sreg = sreg;
     m_sock[i].m_tx_buf = TX_MEMORY_BASE + (i * BUF_MAX);
@@ -562,8 +565,6 @@ W5100::begin(uint8_t ip[4], uint8_t subnet[4], uint16_t timeout)
   write(M_CREG(MR), MR_RST);
   write(M_CREG(SHAR), mac, sizeof(m_creg->SHAR));
   write(M_CREG(RTR), &timeout, sizeof(m_creg->RTR));
-  write(M_CREG(TMSR), TX_MEMORY_SIZE);
-  write(M_CREG(RMSR), RX_MEMORY_SIZE);
 
   // Set source network address, subnet mask and default gateway
   bind(ip, subnet);
