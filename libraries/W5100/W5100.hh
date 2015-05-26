@@ -85,7 +85,7 @@ public:
     uint8_t INTLEVEL[2];	//!< Interrupt Low Level Timer
     uint8_t reserved5[2];	//!< Reserved.
     uint8_t IR2;			//!< Socket Interrupt Register.
-    uint8_t PSTATUS;		//!< Socket Interrupt Register.
+    uint8_t PSTATUS;		//!< PHY Status
     uint8_t IMR2;			//!< Socket Interrupt Register Mask.
   };
 
@@ -558,12 +558,6 @@ public:
 
   /** DNS server network address (provided by DHCP). */
   uint8_t m_dns[4];
-
-  /** SPI Command codes. Format: [Command 8b] [Address 16b] [data 8b]. */
-  enum {
-    OP_WRITE = 0xf0,
-    OP_READ = 0x0f
-  } __attribute__((packed));
 
   /**
    * Write byte to given address.
