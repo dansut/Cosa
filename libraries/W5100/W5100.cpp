@@ -17,7 +17,7 @@
  *
  * This file is part of the Arduino Che Cosa project.
  *
- * Code implements W5200 *NOT* W5100 despite naming.
+ * Code implements W5500 *NOT* W5100 despite naming.
  */
 
 #include "W5100.hh"
@@ -26,8 +26,8 @@
 
 #if !defined(BOARD_ATTINY)
 
-#define M_CREG(name) uint16_t(&m_creg->name)
-#define M_SREG(name) uint16_t(&m_sreg->name)
+#define M_CREG(name) uint16_t(&m_creg->name), SPI_CP_BSB_CR
+#define M_SREG(name) uint16_t(&m_sreg->name), (SPI_CP_BSB_SR | (m_snum<<5))
 
 const uint8_t W5100::MAC[6] __PROGMEM = {
   0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED
@@ -35,7 +35,7 @@ const uint8_t W5100::MAC[6] __PROGMEM = {
 
 W5100::W5100(const uint8_t* mac, Board::DigitalPin csn) :
   SPI::Driver(csn, SPI::ACTIVE_LOW, SPI::DIV2_CLOCK, 0, SPI::MSB_ORDER, NULL),
-  m_creg((CommonRegister*) COMMON_REGISTER_BASE),
+  m_creg(NULL),
   m_local(Socket::DYNAMIC_PORT),
   m_mac(mac)
 {
@@ -44,16 +44,15 @@ W5100::W5100(const uint8_t* mac, Board::DigitalPin csn) :
 }
 
 void
-W5100::write(uint16_t addr, const void* buf, size_t len, bool progmem)
+W5100::write(uint16_t addr, uint8_t ctl, const void* buf, size_t len, bool progmem)
 {
-  if(len == 0) return; // Zero len write upsets W5200 apparently
+  ctl |= (SPI_CP_RWB_WS | SPI_CP_OM_VDM); // Complete Control Byte by setting to write and variable data length mode
   const uint8_t* bp = (const uint8_t*) buf;
   spi.acquire(this);
   spi.begin();
   spi.transfer_start(addr >> 8);
   spi.transfer_next(addr); // no longer need to increment as can burst write
-  spi.transfer_next((0x80 | ((len & 0x7F00) >> 8))); // Top bit set for write
-  spi.transfer_next(len & 0x00FF); // with burst length following
+  spi.transfer_next(ctl);
   for (size_t i=0; i < len; i++) {
     spi.transfer_next(progmem ? pgm_read_byte(bp+i) : bp[i]);
   }
@@ -65,23 +64,23 @@ W5100::write(uint16_t addr, const void* buf, size_t len, bool progmem)
 }
 
 uint8_t
-W5100::read(uint16_t addr)
+W5100::read(uint16_t addr, uint8_t ctl)
 {
   uint8_t res;
-  read(addr, &res, 1);
+  read(addr, ctl, &res, 1);
   return (res);
 }
 
 void
-W5100::read(uint16_t addr, void* buf, size_t len)
+W5100::read(uint16_t addr, uint8_t ctl, void* buf, size_t len)
 {
+  ctl |= (SPI_CP_RWB_RS | SPI_CP_OM_VDM); // Complete Control Byte by setting to write and variable data length mode
   uint8_t* bp = (uint8_t*) buf;
   spi.acquire(this);
   spi.begin();
   spi.transfer_start(addr >> 8);
   spi.transfer_next(addr);
-  spi.transfer_next((len & 0x7F00) >> 8); // Top bit clear for write
-  spi.transfer_next(len & 0x00FF);  // with burst length following
+  spi.transfer_next(ctl);
   spi.transfer_await();
   for (size_t i=0; i < len; i++) {
     bp[i] = spi.transfer(0);
@@ -93,10 +92,10 @@ W5100::read(uint16_t addr, void* buf, size_t len)
 }
 
 void
-W5100::issue(uint16_t addr, uint8_t cmd)
+W5100::issue(uint16_t addr, uint8_t ctl, uint8_t cmd)
 {
-  write(addr, cmd);
-  do DELAY(10); while (read(addr));
+  write(addr, ctl, cmd);
+  do DELAY(10); while (read(addr, ctl));
 }
 
 int
@@ -114,17 +113,8 @@ W5100::Driver::dev_read(void* buf, size_t len)
   m_dev->read(M_SREG(RX_RD), &ptr, sizeof(ptr));
   ptr = swap(ptr);
 
-  // Read packet to receiver buffer. Handle possible buffer wrapping
-  uint8_t* bp = (uint8_t*) buf;
-  uint16_t offset = ptr & BUF_MASK;
-  if (offset + len > BUF_MAX) {
-    uint16_t size = BUF_MAX - offset;
-    m_dev->read(m_rx_buf + offset, bp, size);
-    m_dev->read(m_rx_buf, bp + size, len - size);
-  }
-  else {
-    m_dev->read(m_rx_buf + offset, bp, len);
-  }
+  // Read packet to receiver buffer.
+  m_dev->read(ptr, (SPI_CP_BSB_RX | (m_snum<<5)), (uint8_t*) buf, len);
 
   // Update receiver buffer pointer
   ptr += len;
@@ -143,19 +133,9 @@ W5100::Driver::dev_write(const void* buf, size_t len, bool progmem)
   if (UNLIKELY(len == 0)) return (0);
   if (UNLIKELY(len > BUF_MAX)) len = BUF_MAX;
 
-  // Write packet to transmitter buffer. Handle possible buffer wrapping
-  const uint8_t* bp = (const uint8_t*) buf;
-  uint16_t offset = m_tx_offset;
-  if (offset + len > BUF_MAX) {
-    uint16_t size = BUF_MAX - offset;
-    m_dev->write(m_tx_buf + offset, bp, size, progmem);
-    m_dev->write(m_tx_buf, bp + size, len - size, progmem);
-    m_tx_offset = len - size;
-  }
-  else {
-    m_dev->write(m_tx_buf + offset, bp, len, progmem);
-    m_tx_offset += len;
-  }
+  // Write packet to transmitter buffer.
+  m_dev->write(m_tx_offset, (SPI_CP_BSB_TX | (m_snum<<5)), (const uint8_t*) buf, len, progmem);
+  m_tx_offset += len;
 
   // Update transmitter buffer pointer
   m_tx_len += len;
@@ -184,8 +164,7 @@ W5100::Driver::dev_setup()
   while (room() < (int) MSG_MAX) yield();
   uint16_t ptr;
   m_dev->read(M_SREG(TX_WR), &ptr, sizeof(ptr));
-  ptr = swap(ptr);
-  m_tx_offset = ptr & BUF_MASK;
+  m_tx_offset = swap(ptr);
   m_tx_len = 0;
 }
 
@@ -286,8 +265,7 @@ W5100::Driver::open(Protocol proto, uint16_t port, uint8_t flag)
   if (((proto == TCP) && (status != SR_INIT))
       || ((proto == UDP) && (status != SR_UDP))
       || ((proto == IPRAW) && (status != SR_IPRAW))
-      || ((proto == MACRAW) && (status != SR_MACRAW))
-      || ((proto == PPPoE) && (status != SR_PPPoE)))
+      || ((proto == MACRAW) && (status != SR_MACRAW)))
     return (EPROTO);
 
   // Mark socket as in use
@@ -327,8 +305,7 @@ W5100::Driver::accept()
   // Check that the socket is in TCP mode
   if (UNLIKELY(m_proto != TCP)) return (EPROTO);
   uint8_t status = m_dev->read(M_SREG(SR));
-  if ((status == SR_LISTEN) || (status == SR_ARP)) return (EFAULT);
-  if (status != SR_ESTABLISHED) return (EFAULT);
+  if ((status == SR_LISTEN) || (status != SR_ESTABLISHED)) return (EFAULT);
 
   // Get connecting client address and setup transmit buffer
   int16_t dport;
@@ -540,11 +517,9 @@ W5100::begin(uint8_t ip[4], uint8_t subnet[4], uint16_t timeout)
 {
   // Initiate socket structure; buffer allocation and socket register pointer
   for (uint8_t i = 0; i < SOCK_MAX; i++) {
-    SocketRegister* sreg = (SocketRegister*)(SOCKET_REGISTER_BASE + (i * SOCKET_REGISTER_SIZE));
     m_sock[i].m_proto = 0;
-    m_sock[i].m_sreg = sreg;
-    m_sock[i].m_tx_buf = TX_MEMORY_BASE + (i * BUF_MAX);
-    m_sock[i].m_rx_buf = RX_MEMORY_BASE + (i * BUF_MAX);
+    m_sock[i].m_sreg = NULL;
+    m_sock[i].m_snum = i;
     m_sock[i].m_dev = this;
   }
 

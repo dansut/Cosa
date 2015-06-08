@@ -28,11 +28,11 @@
 #include "Cosa/Socket.hh"
 
 /**
- * Despite name this code works with W5200 NOT W5100 - implemented this
+ * Despite name this code works with W5500 NOT W5100 - implemented this
  * way so as to illustrate changes that need to be made to make function
  * and as a discussion point as to how properly integrate functionality.
  *
- * Cosa WIZnet W5200 device driver class. Provides an implementation
+ * Cosa WIZnet W5500 device driver class. Provides an implementation
  * of the Cosa Socket and Cosa IOStream::Device classes. A socket may
  * be bound directly to a Cosa IOStream. The device internal
  * transmitter buffer is used. The buffer is sent on flush (TCP/UDP)
@@ -42,7 +42,7 @@
  *
  * @section Circuit
  * @code
- *                           W5200
+ *                           W5500
  *                       +------------+
  * (D10)--------------29-|CSN         |
  * (D11)--------------28-|MOSI        |
@@ -53,15 +53,15 @@
  * @endcode
  *
  * @section References
- * 1. W5200 Datasheet Version 1.3.0, Jul. 03, 2013,
- * http://www.wiznet.co.kr/Admin_Root/UpLoad_Files/BoardFiles/W5200_DS_V130E.pdf
- * 2. W5200 Errata Sheet 1.0.6 Jul. 08 2014
- * http://www.wiznet.co.kr/Admin_Root/UpLoad_Files/BoardFiles/W5200_ES_V106E.pdf
+ * 1. W5500 Datasheet Version 1.0.6, Dec. 30, 2014,
+ * http://wizwiki.net/wiki/lib/exe/fetch.php?media=products:w5500:w5500_ds_v106e_141230.pdf
+ * 2. W5500 Application Note 1.1.0  Apr. 09, 2014
+ * http://wizwiki.net/wiki/lib/exe/fetch.php?media=products:w5500:w5500_ap_ipraw_v110e.pdf
  */
 class W5100 : private SPI::Driver {
 public:
   /**
-   * Common Registers (chap. 3.1, pp. 15), big-endian 16-bit values.
+   * Common Registers (chap. 3.1, pp. 30), big-endian 16-bit values.
    */
   struct CommonRegister {
     uint8_t MR;			//!< Mode Register.
@@ -69,24 +69,23 @@ public:
     uint8_t SUBR[4];		//!< Subnet mask Address Register.
     uint8_t SHAR[6];		//!< Source Hardware Address Register.
     uint8_t SIPR[4];		//!< Source IP Address Register.
-    uint8_t reserved1[2];	//!< Reserved.
+    uint16_t INTLEVEL;	//!< Interrupt Low Level Timer
     uint8_t IR;			//!< Interrupt Register.
     uint8_t IMR;		//!< Interrupt Mask Register.
+    uint8_t SIR;		//!< Socket Interrupt Register.
+    uint8_t SIMR;		//!< Socket Interrupt Mask Register.
     uint16_t RTR;		//!< Retry Time Register.
     uint8_t RCR;		//!< Retry Count Register.
-    uint8_t reserved2[2];	//!< Reserved.
-    uint8_t PATR[2];		//!< Authentication Type in PPPoE.
-    uint8_t PPPALGO;		//!< Authentication Algorithm in PPPoE
-    uint8_t VERSIONR;		//!< Chip Version
-    uint8_t reserved3[8];	//!< Reserved.
     uint8_t PTIMER;		//!< PPP LCP Request Timer Register.
     uint8_t PMAGIC;		//!< PPP LCP Magic number.
-    uint8_t reserved4[6];	//!< Reserved.
-    uint8_t INTLEVEL[2];	//!< Interrupt Low Level Timer
-    uint8_t reserved5[2];	//!< Reserved.
-    uint8_t IR2;			//!< Socket Interrupt Register.
-    uint8_t PSTATUS;		//!< PHY Status
-    uint8_t IMR2;			//!< Socket Interrupt Register Mask.
+    uint8_t PHAR[6];		//!< PPP Destination MAC Address
+    uint16_t PSID;		//!< PPP Session Identification.
+    uint16_t PMRU;		//!< PPP Maximum Segment Size.
+    uint8_t UIPR[4];		//!< Unreachable IP Address Register
+    uint16_t UPORTR;		//!< Unreachable Port Register
+    uint8_t PHYCFGR;		//!< PHY COnfiguration
+    uint8_t reserved[10];	//!< Reserved
+    uint8_t VERSIONR;		//!< Chip Version
   };
 
   /**
@@ -97,18 +96,21 @@ public:
     MR_WOL = 0x20,		//!< Wake on LAN
     MR_PB = 0x10,		//!< Ping Block Mode.
     MR_PPPoE = 0x08,		//!< PPPoE Mode.
+    MR_FARP = 0x02,		//!< Force ARP
   } __attribute__((packed));
 
   /**
-   * Interrupt Register bitfields, pp. 18.
+   * Interrupt Register bitfields, pp. 36.
    */
   enum {
     IR_CONFLICT = 0x80,		//!< IP Conflict.
+    IR_UNREACH = 0x40,		//!< Destination Unreachable
     IR_PPPoE = 0x20,		//!< PPPoE Connection Close.
+    IR_MP = 0x10,		//!< Magic Packet
   } __attribute__((packed));
 
   /**
-   * Socket Interrupt Register (IR2) bitfields, pp. 22.
+   * Socket Interrupt Register (IR2) bitfields, pp. 38.
    */
   enum {
     IR2_S7_INT = 0x80,		//!< Occurrence of Socket 7 Socket Interrupt.
@@ -122,7 +124,7 @@ public:
   } __attribute__((packed));
 
   /**
-   * Interrupt Mask Register bitfields, pp. 19.
+   * Interrupt Mask Register bitfields, pp. 38.
    */
   enum {
     IMR_S7_INT = 0x80,		//!< Mask occurrence of Socket 7 Socket Interrupt.
@@ -143,12 +145,8 @@ public:
     IMR2_PPPoE = 0x20,		//!< Mask PPPoE Connection Close.
   } __attribute__((packed));
 
-  /** Common Register Base Address. */
-  static const uint16_t COMMON_REGISTER_BASE = 0x0000;
-  static const uint16_t COMMON_REGISTER_SIZE = sizeof(CommonRegister);
-
   /**
-   * Socket Registers (chap. 4.2 pp. 24).
+   * Socket Register Block (chap. 3.2 pp. 31).
    */
   struct SocketRegister {
     uint8_t MR;			//!< Mode Register.
@@ -160,7 +158,7 @@ public:
     uint8_t DIPR[4];		//!< Destination IP Address Register.
     uint16_t DPORT;		//!< Destination Port Register.
     uint16_t MSSR;		//!< Maximum Segment Size Register.
-    uint8_t PROTO;		//!< Protocol in IP Raw mode.
+    uint8_t PROTO;		//!< Protocol in IP Raw mode. See W5500 Application Note doc
     uint8_t TOS;		//!< IP TOS.
     uint8_t TTL;		//!< IP TTL.
     uint8_t reserved1[7];	//!< Reserved.
@@ -174,10 +172,11 @@ public:
     uint16_t RX_WR;		//!< RX Write Pointer Register.
     uint8_t IMR;		//!< Interrupt Mask Register.
     uint16_t FRAG;		//!< Fragment Register.
+    uint8_t KPALVTR;		//!< Keep alive timer
   };
 
   /**
-   * RX/TX Socket Memory Size bitfield pp. 37.
+   * RX/TX Socket Memory Size bitfield pp. 54-55.
    */
   enum {
     MEM_SIZE_00K = 0x00,    	//!< 0KB
@@ -189,25 +188,24 @@ public:
   } __attribute__((packed));
 
   /**
-   * Socket Mode Register bitfields, pp 24.
+   * Socket Mode Register bitfields, pp 45-46.
    */
   enum {
     MR_FLAG_MASK = 0xe0,	//!< Flag mask.
-    MR_MULTI = 0x80,		//!< Multicasting.
-    MR_MF = 0x40,		//!< MAC Filter.
-    MR_ND = 0x20,		//!< Use No Delay ACK.
-    MR_MC = 0x20,		//!< Multicast version.
-    MR_PROTO_MASK = 0x0f,	//!< Protocol.
+    MR_MULTIMF = 0x80,		//!< Multicast(UDP) MAC Filter(MACRAW).
+    MR_BCASTB = 0x40,		//!< Broadcast Block(UDP & MACRAW)
+    MR_NDMCMMB = 0x20,		//!< No Delayed ACK(TCP) Multicast IGMP version(UDP) Multicast Block(MACRAW).
+    MR_UCASTB = 0x10,		//!< Unicast Block(UDP) IPv6 Block(MACRAW)
+    MR_PROTO_MASK = 0x0f,	//!< Protocol mask.
     MR_PROTO_CLOSED = 0x00,	//!< Closed.
     MR_PROTO_TCP = 0x01,	//!< TCP.
     MR_PROTO_UDP = 0x02,	//!< UDP.
-    MR_PROTO_IPRAW = 0x03,	//!< RAW IP.
+    MR_PROTO_IPRAW = 0x03,	//!< RAW IP. See W5500 Application Note doc
     MR_PROTO_MACRAW = 0x04,	//!< RAW MAC.
-    MR_PROTO_PPPoE = 0x05	//!< PPPoE.
   } __attribute__((packed));
 
   /**
-   * Socket Command Register values, pp. 26-27
+   * Socket Command Register values, pp. 47-49
    */
   enum {
     CR_OPEN = 0x01,		//!< Initiate socket according to MR.
@@ -222,12 +220,9 @@ public:
   } __attribute__((packed));
 
   /**
-   * Socket Interrupt Register bitfields, pp. 29.
+   * Socket Interrupt Register bitfields, pp. 49.
    */
   enum {
-    IR_PRECV = 0x80,		//!<.PPP interrupt for option not supported
-    IR_PFAIL = 0x40,		//!< PPP interrupt for PAP auth failed
-    IR_PNEXT = 0x20,		//!< PPP interrupt for phase change during ADSL
     IR_SEND_OK = 0x10,		//!< Send operation is completed.
     IR_TIMEOUT = 0x08,		//!< Timeout occured.
     IR_RECV = 0x04,		//!< Received data.
@@ -236,11 +231,10 @@ public:
   } __attribute__((packed));
 
   /**
-   * Socket Status Register values, pp. 27.
+   * Socket Status Register values, pp. 50-51.
    */
   enum {
     SR_CLOSED = 0x00,
-    SR_ARP = 0x01,
     SR_INIT = 0x13,
     SR_LISTEN = 0x14,
     SR_SYNSENT = 0x15,
@@ -254,24 +248,28 @@ public:
     SR_UDP = 0x22,
     SR_IPRAW = 0x32,
     SR_MACRAW = 0x42,
-    SR_PPPoE = 0x5F
   } __attribute__((packed));
 
-  /** Socket Registers Base Address. */
-  static const uint16_t SOCKET_REGISTER_BASE = 0x4000;
-  static const uint16_t SOCKET_REGISTER_SIZE = 0x0100;
-
-  /** TX Memory Address. */
-  static const uint16_t TX_MEMORY_BASE = 0x8000;
-  static const uint16_t TX_MEMORY_MAX = 0x4000;
-
-  /** RX Memory Address. */
-  static const uint16_t RX_MEMORY_BASE = 0xC000;
-  static const uint16_t RX_MEMORY_MAX = 0x4000;
+  /**
+   * SPI Control Phase bits and masks, pp. 16-17.
+   * CP byte made up of (BSB & RWB & OM & (SN << 5))
+   * For BSB selecting control register no socket number should ever be given.
+   */
+  enum {
+    SPI_CP_BSB_CR = 0x00, //!< Control Register
+    SPI_CP_BSB_SR = 0x08, //!< Socket Register
+    SPI_CP_BSB_TX = 0x10, //!< Socket TX Buffer
+    SPI_CP_BSB_RX = 0x18, //!< Socket RX Buffer
+    SPI_CP_RWB_RS = 0x00, //!< Read Access Select
+    SPI_CP_RWB_WS = 0x04, //!< Write Access Select
+    SPI_CP_OM_VDM = 0x00, //!< Operation, variable date mode
+    SPI_CP_OM_FD1 = 0x01, //!< Operation, fixed data 1 byte mode
+    SPI_CP_OM_FD2 = 0x02, //!< Operation, fixed data 2 byte mode
+    SPI_CP_OM_FD4 = 0x03, //!< Operation, fixed data 3 byte mode
+  } __attribute__((packed));
 
   /** Socket Buffer Size; 2 Kbyte TX/RX per socket. */
   static const size_t BUF_MAX = 2048; // Not really max, fixed here to all MEM_SIZE_02K
-  static const uint16_t BUF_MASK = 0x07ff; // BUF_MAX - 1
 
   /** TX Message Size; internal buffer size for flush threshold. */
   static const size_t MSG_MAX = BUF_MAX / 2;
@@ -328,17 +326,14 @@ public:
     /** Pointer to device context. */
     W5100* m_dev;
 
-    /** Pointer to socket transmitter buffer. */
-    uint16_t m_tx_buf;
+    /** The W5100 socket number. */
+    uint8_t m_snum;
 
     /** Offset in socket transmitter buffer. */
     uint16_t m_tx_offset;
 
     /** Length of message in socket transmitter buffer. */
     uint16_t m_tx_len;
-
-    /** Pointer to socket receiver buffer. */
-    uint16_t m_rx_buf;
 
   public:
     /** Default constructor. */
@@ -562,56 +557,62 @@ public:
   /**
    * Write byte to given address.
    * @param[in] addr address on device.
+   * @param[in] ctl byte specifiying what block of memory to access, BSB of Control Phase byte
    * @param[in] data to write.
    */
-  void write(uint16_t addr, uint8_t data)
+  void write(uint16_t addr, uint8_t ctl, uint8_t data)
   {
-    write(addr, &data, 1);
+    write(addr, ctl, &data, 1);
   }
 
   /**
    * Write data from given buffer with given number of bytes to address.
    * @param[in] addr address on device.
+   * @param[in] ctl byte specifiying what block of memory to access, BSB of Control Phase byte
    * @param[in] buf pointer to buffer.
    * @param[in] len number of bytes to write.
    * @param[in] progmem program memory pointer flag.
    */
-  void write(uint16_t addr, const void* buf, size_t len, bool progmem=false);
+  void write(uint16_t addr, uint8_t ctl, const void* buf, size_t len, bool progmem=false);
 
   /**
    * Write data from given program memory buffer with given number of
    * bytes to address.
    * @param[in] addr address on device.
+   * @param[in] ctl byte specifiying what block of memory to access, BSB of Control Phase byte
    * @param[in] buf pointer to buffer in program memory.
    * @param[in] len number of bytes to write.
    */
-  void write_P(uint16_t addr, const void* buf, size_t len)
+  void write_P(uint16_t addr, uint8_t ctl, const void* buf, size_t len)
   {
-    write(addr, buf, len, true);
+    write(addr, ctl, buf, len, true);
   }
 
   /**
    * Read byte from given address.
+   * @param[in] ctl byte specifiying what block of memory to access, BSB of Control Phase byte
    * @param[in] addr address on device.
    */
-  uint8_t read(uint16_t addr);
+  uint8_t read(uint16_t addr, uint8_t ctl);
 
   /**
    * Read data from given address on device to given buffer with given
    * number of bytes.
    * @param[in] addr address on device.
+   * @param[in] ctl byte specifiying what block of memory to access, BSB of Control Phase byte
    * @param[in] buf pointer to buffer.
    * @param[in] len number of bytes to read.
    */
-  void read(uint16_t addr, void* buf, size_t len);
+  void read(uint16_t addr, uint8_t ctl, void* buf, size_t len);
 
   /**
    * Issue given command to register with given address and await
    * completion.
    * @param[in] addr address on device.
+   * @param[in] ctl byte specifiying what block of memory to access, BSB of Control Phase byte
    * @param[in] cmd command to issue.
    */
-  void issue(uint16_t addr, uint8_t cmd);
+  void issue(uint16_t addr, uint8_t ctl, uint8_t cmd);
 
 public:
   /**
