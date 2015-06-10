@@ -315,6 +315,7 @@ W5100::Driver::listen()
 {
   // Check that the socket is in TCP mode
   if (UNLIKELY(m_proto != TCP)) return (EPROTO);
+  if (m_dev->read(M_SREG(SR)) != SR_INIT) m_dev->issue(M_SREG(CR), CR_OPEN);
   m_dev->issue(M_SREG(CR), CR_LISTEN);
   if (m_dev->read(M_SREG(SR)) == SR_LISTEN) return (0);
   return (EFAULT);
